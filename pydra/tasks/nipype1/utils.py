@@ -5,7 +5,13 @@ import typing as ty
 from copy import deepcopy
 import os
 from nipype.interfaces.spm.base import SPMCommand
+from nipype.interfaces.fsl.base import FSLCommand
 from copy import deepcopy
+from pydra.engine.specs import attr_fields
+from pydra.engine.helpers_file import is_existing_file
+from pathlib import Path
+import shutil
+from os.path import join as opj
 
 def traitedspec_to_specinfo(traitedspec):
     trait_names = set(traitedspec.copyable_trait_names())
@@ -134,25 +140,57 @@ class Nipype1DockerTask(pydra.engine.task.TaskBase):
         )
         self.output_spec = traitedspec_to_specinfo(interface._outputs())
         self.image = image
+        self.bindings = []
 
     def _run_task(self):
+        inputs = attr.asdict(self.inputs, filter=lambda a, v: v is not attr.NOTHING)
+        self._create_bindings(inputs)
+        self.bindings.append(("/home/jwigger/Documents/", "/home/jwigger/Documents/"))
+        print("bindings", self.bindings)
         print("inside run task:", self.name)
         if not isinstance(self._interface, SPMCommand):
             print(self.name, os.getcwd(), self.output_dir)
-            inputs = attr.asdict(self.inputs, filter=lambda a, v: v is not attr.NOTHING)
+
             node = nipype.Node(self._interface, base_dir=self.output_dir, name=self.name)
             node.inputs.trait_set(**inputs)
-            print(self._interface.inputs)
+            print()
+            print(self._interface.cmdline)
             cmdargs = self._interface.cmdline.split(" ")
             cmd = cmdargs
             print("before")
-            docky = pydra.DockerTask(name="docky", executable=cmd, image=self.image, bindings = [ ("/home/jwigger/Documents/", "/home/jwigger/Documents/")], cache_dir = self.output_dir)
-            print("after", docky.cmdline)
+            self.bindings.append((self.output_dir, self.output_dir))
+            # The problem: for fsl it creates the outputs in output_dir
+            # as the interface reads the current wd and creates the output path
+            # which is an argument on the command line.
+
+            # For FSL no output files are specified and it uses cwd at Runtime
+            # So the results get written in to the folder of DockerTask
+            docky = pydra.DockerTask(name="docky", executable=cmd, image=self.image, bindings = self.bindings, cache_dir = self.output_dir)
             res = docky()
-            actual_res = res.output.stdout.split("\n")[3:]
-            out = "\n".join(actual_res)
+            print("after", docky.cmdline)
+
+
+            print(self.name, "res", res)
+            print()
+            print(docky.output_dir)
+            parent  = docky.output_dir
+            curr  = docky.cache_dir
+            dir_list = os.listdir(parent)
+            print(dir_list)
+            for f in dir_list:
+                if f not in ["_task.pklz", "_error.pklz", "_result.pklz"]:
+                    print(opj(parent, f), opj(curr, f))
+                    shutil.move(opj(parent, f), opj(curr, f))
+
+            if isinstance(self._interface, FSLCommand): #assumes other commands do not run in an docker containing fsl
+                out = res.output.stdout.split("\n")[3:]
+                out = "\n".join(out)
+            else:
+                out = res.output.stdout
+            print(self.name, "out", out)
             runtime = Runtime(out)
             self.output_ = self._interface.aggregate_outputs(runtime).get()
+            print(self.name, "fin")
         else:
             print("SPM", self.name, os.getcwd(), self.output_dir)
             self._interface._matlab_cmd = '/opt/spm12-r7219/run_spm12.sh /opt/matlabmcr-2010a/v713 script'  #= os.environ["SPMMCRCMD"] In the worstcase I just need to run a docker command to get this.
@@ -160,7 +198,6 @@ class Nipype1DockerTask(pydra.engine.task.TaskBase):
             self._interface._check_mlab_inputs()
             self._interface._matlab_cmd_update()
             print(self._interface.mlab.cmd)
-            inputs = attr.asdict(self.inputs, filter=lambda a, v: v is not attr.NOTHING)
             node = nipype.Node(self._interface, base_dir=self.output_dir, name=self.name)
             node.inputs.trait_set(**inputs)
             print(self.name, "set traits")
@@ -172,15 +209,25 @@ class Nipype1DockerTask(pydra.engine.task.TaskBase):
             cmdargs = self._interface.mlab.cmdline.split(" ")
             cmd = cmdargs
             print(self.name, "before", self.image, self._interface.version)
-            docky = pydra.DockerTask(name="docky", executable=cmd, image=self.image, bindings = [ ("/home/jwigger/Documents/", "/home/jwigger/Documents/")], cache_dir = self.output_dir)
+            docky = pydra.DockerTask(name="docky", executable=cmd, image=self.image, bindings = self.bindings, cache_dir = self.output_dir)
             print(self.name, "after", docky.cmdline)
             res = docky()
             print(res)
-            actual_res = res.output.stdout.split("\n")[3:]
-            out = "\n".join(actual_res)
-            print(self.name, "out")
+            out = res.output.stdout
+            print(self.name, "out", out)
             runtime = Runtime(out)
             self._interface.version = "spm12" #TODO read it from out.
             print("VERSION", self._interface.version)
             self.output_ = self._interface.aggregate_outputs(runtime).get()#res.outputs.get()
             print("fin", self.name)
+
+    def _create_bindings(self, inputs):
+        for k, v in inputs.items():
+            print(k,v)
+            if is_existing_file(v):
+                print("is local", v)
+                value = Path(v)
+                print(value)
+                self.bindings.append((value.parent,value.parent))
+            else:
+                print("not local")
