@@ -12,6 +12,7 @@ from pydra.engine.helpers_file import is_existing_file
 from pathlib import Path
 import shutil
 from os.path import join as opj
+from pydra.engine.helpers import execute
 
 def traitedspec_to_specinfo(traitedspec):
     trait_names = set(traitedspec.copyable_trait_names())
@@ -141,11 +142,24 @@ class Nipype1DockerTask(pydra.engine.task.TaskBase):
         self.output_spec = traitedspec_to_specinfo(interface._outputs())
         self.image = image
         self.bindings = []
+    
+    def _create_command(self, cmd):
+        docker_cmd = ["docker", "run", "--rm"]
+        for bind in self.bindings:
+            docker_cmd.append("-v")
+            docker_cmd.append(str(bind[0])+":"+str(bind[1]))
+        docker_cmd.append("-w")
+        docker_cmd.append(str(self.output_dir))
+        docker_cmd.append(self.image)
+        docker_cmd = docker_cmd + cmd
+        return docker_cmd
+        
 
     def _run_task(self):
         inputs = attr.asdict(self.inputs, filter=lambda a, v: v is not attr.NOTHING)
         self._create_bindings(inputs)
-        self.bindings.append(("/home/jwigger/Documents/", "/home/jwigger/Documents/"))
+        #self.bindings.append(("/home/jeffrey/Documents/", "/home/jeffrey/Documents/"))
+        self.bindings.append(("/tmp/test", "/tmp/test"))
         print("bindings", self.bindings)
         print("inside run task:", self.name)
         if not isinstance(self._interface, SPMCommand):
@@ -157,36 +171,27 @@ class Nipype1DockerTask(pydra.engine.task.TaskBase):
             print(self._interface.cmdline)
             cmdargs = self._interface.cmdline.split(" ")
             cmd = cmdargs
-            print("before")
+            
+            print("before", cmd)
             self.bindings.append((self.output_dir, self.output_dir))
-            # The problem: for fsl it creates the outputs in output_dir
-            # as the interface reads the current wd and creates the output path
-            # which is an argument on the command line.
+            print(self.bindings)
+            
+            cmd = self._create_command(cmd)
+            print("cmd: ", cmd)
+            res = execute(cmd)#docky()
+            print("after!")
 
-            # For FSL no output files are specified and it uses cwd at Runtime
-            # So the results get written in to the folder of DockerTask
-            docky = pydra.DockerTask(name="docky", executable=cmd, image=self.image, bindings = self.bindings, cache_dir = self.output_dir)
-            res = docky()
-            print("after", docky.cmdline)
-
-
-            print(self.name, "res", res)
             print()
-            print(docky.output_dir)
-            parent  = docky.output_dir
-            curr  = docky.cache_dir
-            dir_list = os.listdir(parent)
+            print(self.name, "res", res)
+            dir_list = os.listdir(self.output_dir)#parent)
             print(dir_list)
-            for f in dir_list:
-                if f not in ["_task.pklz", "_error.pklz", "_result.pklz"]:
-                    print(opj(parent, f), opj(curr, f))
-                    shutil.move(opj(parent, f), opj(curr, f))
 
-            if isinstance(self._interface, FSLCommand): #assumes other commands do not run in an docker containing fsl
-                out = res.output.stdout.split("\n")[3:]
+
+            if isinstance(self._interface, FSLCommand):
+                out = res[1].split("\n")[3:]
                 out = "\n".join(out)
             else:
-                out = res.output.stdout
+                out = res[1]
             print(self.name, "out", out)
             runtime = Runtime(out)
             self.output_ = self._interface.aggregate_outputs(runtime).get()
